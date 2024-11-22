@@ -1,0 +1,149 @@
+#include "stdlib-ext.fc";
+#include "opcodes.fc";
+#include "tlb.fc";
+
+;; Validates a proposal signature and returns (tag, lower_bound, upper_bound)
+;; If tag == 3, signature check is skipped (special case)
+(int, int, int) parse_proposal_check_sig(slice v, slice keys) impure inline {
+  (int tag, slice sig, int lb, int ub) = job::parse_proposal_with_tag(v);
+  
+  if (tag != 3) {
+    slice key = keys.extract_part(tag * 256, 256);
+    throw_unless(198,
+      check_signature(cell_hash(job::wrap_for_signing(lb, ub)),
+        sig,
+        key.preload_uint(256)));
+  }
+  
+  return (tag, lb, ub);
+}
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Getter Methods
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;; Returns current state of the job contract (0=unlocked, 1=locked_on_offer, 2=locked_working)
+int get_job_state() method_id {
+  return get_data().begin_parse().preload_uint(2);
+}
+;; Returns the address we're waiting for a message from
+slice waiting_message_from() method_id {
+  slice own_data = get_data().begin_parse();
+  own_data~skip_bits(2);
+  return own_data~load_msg_addr();
+}
+;; Returns the job description cell
+cell get_job_description() method_id {
+  return get_data().begin_parse().preload_ref();
+}
+;; Returns the job value in nanoTONs
+int get_job_value() method_id {
+  slice own_data = get_data().begin_parse();
+  int tag = own_data~load_uint(2);
+  if (tag) { own_data~load_msg_addr(); }
+  own_data~load_msg_addr();
+  return own_data~load_uint(64);
+}
+;; Returns the address of the job poster
+slice get_job_poster() method_id {
+  slice own_data = get_data().begin_parse();
+  int tag = own_data~load_uint(2);
+  if (tag) { own_data~load_msg_addr(); }
+  return own_data~load_msg_addr();
+}
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;; Incoming messages:
+;; CUS-1.           poster      [empty]
+;; CUS-1,2-REV.     poster      op::cancel_job
+;; CUS-4.           offer       [insufficient value to even notice it]
+;; CUS-5.           poster      op::lock_on_offer
+;; CUS-7-ERR.       offer       op::refuse_collapse [bounced]
+;; CUS-9-OK.        offer       op::lock_success
+;; CUS-9-ERR.       offer       op::lock_failed
+;; CUS-12.          anyone      op::finish_job
+
+() recv_internal(int msg_value, cell in_msg, slice in_msg_body) {
+  terminate_if(in_msg_body.slice_bits() < 32);
+  
+  (int bounced, slice sender) = in_msg.load_bounced_sender();
+  
+  int op = in_msg_body~load_uint(32);
+  
+  slice own_data = get_data().begin_parse();
+  int tag = own_data~load_uint(2);
+  
+  if (tag == job::tag::unlocked) {
+    ;; State 0: Job is open, can be cancelled or locked to an offer
+    if (op == op::cancel_job) {
+      throw_unless(200, own_data.starts_with(sender));
+      send_text(mode::destroy_into(), sender, 0, "Job destroyed.");
+      terminate();
+    } elseif (op == op::lock_on_offer) {
+      ;; Lock job to specific offer, requires 1 TON deposit
+      throw_unless(200, own_data.starts_with(sender));
+      throw_unless(199, msg_value >= TON);
+      
+      (_, slice offer_addr) = job::ld_msg_lock_on(in_msg_body);
+      send_to(mode::forward_value(), offer_addr, 0, null(),
+        job::st_msg_collapse);
+      set_data(begin_cell()
+        .store_uint(job::tag::locked_on_offer, 2)
+        .job::st_locked(offer_addr, own_data)
+        .end_cell());
+      terminate();
+    }
+  } elseif (tag == job::tag::locked_on_offer) {
+    ;; State 1: Job is locked to specific offer, waiting for worker confirmation
+    if (op == op::lock_success) {
+      ;; Worker accepted the job, transition to working state
+      ;; throw_unless(200, own_data.starts_with(sender));
+      (slice offer, slice poster, int value, cell poster_desc, slice poster_key)
+        = job::ld_locked(own_data);
+      throw_unless(200, equal_slices(offer, sender));
+      
+      (slice worker, cell worker_desc, slice worker_key)
+        = job::ld_msg_lock_success(in_msg_body);
+      
+      set_data(begin_cell()
+        .store_uint(job::tag::locked_working, 2)
+        .job::st_working(poster, worker, value, poster_desc, worker_desc,
+          poster_key, worker_key)
+        .end_cell());
+      terminate();
+    } elseif ((op == op::lock_failed) | bounced) {
+      ;; Worker declined or message bounced, return to unlocked state
+      ;; throw_unless(200, own_data.starts_with(sender));
+      throw_unless(200, equal_slices(sender, own_data~load_msg_addr()));
+      set_data(begin_cell()
+        .store_uint(job::tag::unlocked, 2)
+        .job::st_unlocked(own_data)
+        .end_cell());
+      terminate();
+    }
+  } elseif (tag == job::tag::locked_working) {
+    ;; State 2: Job is in progress, can only be finished
+    if (op == op::finish_job) {
+      ;; Both parties must submit signed proposals for payment amount
+      ;; Payment will be between the maximum of lower bounds and minimum of upper
+      (slice poster, slice worker, cell keys) = job::ld_working_main(own_data);
+      slice keys = keys.begin_parse();
+      
+      (slice a, slice b) = job::parse_finish_message(in_msg_body);
+      (int tag_a, int al, int au) = parse_proposal_check_sig(a, keys);
+      (int tag_b, int bl, int bu) = parse_proposal_check_sig(b, keys);
+      throw_if(200, tag_a == tag_b);
+            
+      int nton_min = max(al, bl);
+      int nton_max = min(au, bu);
+      throw_if(200, nton_min > nton_max);
+      
+      send_text(mode::pay_transfer(), worker, nton_max, "Job completed!");
+      send_text(mode::destroy_into(), poster, 0, "Job finished.");
+      terminate();
+    }
+  }
+  
+  throw(0xFFFF);
+}

@@ -1,0 +1,49 @@
+;; ----  Job contract states  --------------------------------------------------
+
+const int job::tag::unlocked        = 0;
+const int job::tag::locked_on_offer = 1;
+const int job::tag::locked_working  = 2;
+
+const int offer::tag::unlocked = 0;
+const int offer::tag::locked   = 1;
+
+;; ----  Offer contract opcodes  -----------------------------------------------
+
+const int op::destruct        = 0x64737472;
+const int op::payment_request = 0x706c7567;
+const int op::payment_ok      = 0x80000000 | op::payment_request;
+const int op::excesses        = 0xd53276db;
+const int op::subscription    = 0x73756273;
+
+;; ----  Job contract opcodes  -------------------------------------------------
+
+const int op::update_job    = 168;        ;; 156 + zlib.crc32(b'op::update_job') % 100
+const int op::lock_on_offer = 172;        ;; 156 + zlib.crc32(b'op::lock_on_offer') % 100
+const int op::collapse      = 177;        ;; 156 + zlib.crc32(b'op::collapse') % 100
+const int op::lock_success  = 173;        ;; 156 + zlib.crc32(b'op::lock_success') % 100
+const int op::lock_failed   = 212;        ;; 156 + zlib.crc32(b'op::lock_failed') % 100
+const int op::cancel_job    = 235;        ;; 156 + zlib.crc32(b'op::cancel_job') % 100
+const int op::finish_job    = 187;        ;; 156 + zlib.crc32(b'op::finish_job') % 100
+
+;; ----  Errors (common)  ------------------------------------------------------
+
+const int err::invalid_sender = 171;      ;; 100 + zlib.crc32(b'err::invalid_sender') % 100
+const int err::invariant_failed = 172;    ;; 100 + zlib.crc32(b'err::invariant_failed') % 100
+const int err::insufficient_stake = 179;  ;; 100 + zlib.crc32(b'err::insufficient_stake') % 100
+const int err::low_job_value = 127;       ;; 100 + zlib.crc32(b'err::low_job_value') % 100
+
+;; ----  TON utility constants  ------------------------------------------------
+
+const int TON = 1000 * 1000 * 1000;
+
+const int DEVELOPMENT = 1;
+
+(int, ()) mode::forward_value() inline { return (64, ()); }
+(int, ()) mode::pay_transfer()  inline { return (1, ()); }
+(int, ()) mode::destroy_into()  inline { return DEVELOPMENT ? (128, ()) : (160, ()); }
+
+;; ----  Addresses (common)  ---------------------------------------------------
+
+const slice job_analytic_address = "UQCN_l4G651qwvZ_ih5riQPbivUcszLggApjWPTYf4Mzujtw"a;
+
+const slice tonify_public_key = "233AD31DA6B7979BA0DC8E4C4FB944639EF447B6ACAD5071BFB466E88FF6F6FB"s;

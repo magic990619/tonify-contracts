@@ -1,0 +1,65 @@
+#include "imports/stdlib.fc";
+
+(builder, ()) ~store_slice(builder, slice) asm "STSLICER";
+(builder, ()) ~store_coins(builder a, int b) asm "STGRAMS";
+(builder, ()) ~store_ref(builder, cell) asm "STREFR";
+
+(slice, int) dict_get?(cell dict, int key_len, slice index)
+    asm(index dict key_len) "DICTGET" "NULLSWAPIFNOT";
+
+slice extract_part(slice v, int offset, int len) asm "SDSUBSTR";
+cell  load_nth_ref(slice v, int offset)          asm "PLDREFVAR";
+
+int starts_with(slice, slice) asm "SDPFXREV";
+int equal_slices(slice, slice) asm "SDEQ";
+int first_bit(slice) asm "SDFIRST";
+int tuple_length(tuple) asm "TLEN";
+
+forall X -> int is_null(X) asm "ISNULL";
+
+(int, slice) load_bounced_sender(cell in_msg) inline {
+  slice in_msg = in_msg.begin_parse();
+  int b = in_msg~load_uint(4) & 1;
+  return (b, in_msg~load_msg_addr());
+}
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;; termination primitives not cleaning stack
+
+() terminate()          impure asm "RETALT";
+() terminate_if(int)    impure asm "IFRETALT";
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+forall ADDARGS ->
+() send_to_rbounceable((int, ()) packed_mode, int bounce, slice dest, int value,
+                       ADDARGS a, ((builder, ADDARGS) -> builder) m)
+                       impure inline {
+  (int mode, _) = packed_mode;
+  
+  send_raw_message(begin_cell()
+    .store_uint(0x10 | (bounce ? 8 : 0), 6)
+    .store_slice(dest)
+    .store_coins(value)
+    .store_uint(1, 107)
+    .store_ref(m(begin_cell(), a).end_cell())
+    .end_cell(), mode);
+}
+forall ADDARGS ->
+() send_to((int, ()) packed_mode, slice dest, int value, ADDARGS a,
+           ((builder, ADDARGS) -> builder) m) impure inline {
+  return send_to_rbounceable(packed_mode, 0, dest, value, a, m);
+}
+() send_text((int, ()) packed_mode, slice dest, int value, slice body)
+             impure inline {
+  (int mode, _) = packed_mode;
+  
+  send_raw_message(begin_cell()
+    .store_uint(0x10, 6)
+    .store_slice(dest)
+    .store_coins(value)
+    .store_uint(0, 107 + 32)
+    .store_slice(body)
+    .end_cell(), mode);
+}
